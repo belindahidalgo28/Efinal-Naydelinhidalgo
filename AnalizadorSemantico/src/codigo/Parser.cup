@@ -1,0 +1,776 @@
+package codigo;
+import  java_cup.runtime.*;
+import java.util.LinkedList;
+import Estructuras.SemanticStack;
+import Estructuras.SematicRegister.*;
+import Estructuras.*;
+import java.util.ArrayList;
+import java.util.Hashtable;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.Writer;
+
+
+/*Parser code*/
+parser code
+{:
+    public LinkedList<ErrorMsg> errorList = new LinkedList<ErrorMsg>();
+    private Integer row, column;
+    private String tokenName;
+    
+
+   public void syntax_error(Symbol s) 
+    {
+        String lexeme = s.value.toString();
+        int row =  s.right + 1;
+        int column = s.left + 1;
+        this.row = row;
+        this.column = column;
+        tokenName = lexeme;
+        System.out.println("Sintax error at: " + lexeme + " row: " + row + " column: " + column);
+        ErrorMsg error =  new ErrorMsg(lexeme, "Syntax error: " + s, row, column);
+        //errorList.add(error);
+    }
+
+    public void addSintaxError(String s, String msg) 
+    {
+        ErrorMsg error =  new ErrorMsg(tokenName, "Syntax error: " + msg, row, column);
+        errorList.add(error);
+    }
+
+    public void unrecovered_syntax_error(Symbol s)
+    {        
+        String lexeme = s.value.toString();
+        tokenName = lexeme;
+        int row = s.right + 1;
+        int column = s.left + 1;
+        this.row = row;
+        this.column = column;
+        System.out.println("Unrecovered Sintax error: " + lexeme + " row: " + row + " column: " + column);
+        ErrorMsg error =  new ErrorMsg(lexeme, "Syntax error: " + s, row, column);
+        //errorList.add(error);
+    }
+:}
+action code
+
+{:
+    public TablaSimbolosSemantico table = new TablaSimbolosSemantico();
+    public SemanticStack stack = new SemanticStack();
+    public Hashtable<String, ErrorMsg> semanticList = new Hashtable<>();
+    int count = 0;
+    Nasm nasmRegisters = new Nasm();
+    String sectionData = "SECTION .data ; data section \n";
+    String sectionCode = "SECTION .text ; code section \n \t global _start ; entry point \n_start: \n";
+
+    public void addSemanticError(Symbol s, String msg) 
+    {
+        ErrorMsg error =  new ErrorMsg(s.value.toString(), "Semantic error: " + msg, s.right, s.left);
+        if(!semanticList.containsKey(s.value.toString())) {
+            semanticList.put(s.value.toString(),error);
+        }
+    }
+
+    public void recuerdaConst(String value,Symbol s){
+        RS_DO register = new RS_DO(RS_TYPES.DO,value,s);
+        register.type = "constante";
+        stack.push(register);
+
+    }
+    
+    public void recuerdaVariable(String name,Symbol s){
+        RS_DO register = new RS_DO(RS_TYPES.DO, "", s);
+        register.type = "direccion";
+        register.name = name;
+        if(!(table.validateEstructura(name))){
+           addSemanticError(s,"la variable no se encuentra declarada");
+        }
+        stack.push(register);
+
+    }
+
+    public String getLiteralType(String value) {
+        if (value.matches("[A-Za-z]")) {
+            return "char";
+        }
+        else if (value.matches("[0-9]+") && value.length() > 0){        
+            return "int";
+        } else {
+            return "char*";
+        }
+    }
+
+    public void recuerdaFuncion(String name, Symbol s) {
+        if(!(table.validateEstructura(name))){
+           addSemanticError(s,"la función no se encuentra declarada");
+        } else {
+            ArrayList<Parametro> args = new ArrayList();
+            Funcion f = table.getFuncion(name);
+            while(stack.getSize() > 2) {
+                RS_DO arg = (RS_DO)stack.pop();
+                if (arg.type.equals("constante")) {
+                    String type = getLiteralType(arg.value);
+                    Parametro p = new Parametro(type,arg.value);
+                    args.add(0,p);
+                }
+            }
+            if (args.size() != f.getParametros().size()) {
+                addSemanticError(s,"la cantidad de parametros no coincide con la definición de la función");
+                stack.pop();
+                stack.pop();
+            }
+            else if (!f.compareArgs(args)) {
+                addSemanticError(s,"el tipo de los parametros no coincide con la definición de la función");
+                stack.pop();
+                stack.pop();
+            }
+            else {
+                System.out.println("Función llamada correctamente.");
+            }
+        }
+    }
+
+    public void recuerdaOperador(String value,Symbol s){
+       
+        RS register = new RS();
+        register.value = value;
+        register.s = s;
+        register.id = RS_TYPES.OPERATOR;
+        stack.push(register);
+
+    }
+
+    public void recuerdaTipo(String value,Symbol s){
+       
+        RS register = new RS();
+        register.value = value;
+        register.s = s;
+        register.id = RS_TYPES.TYPE;
+        stack.push(register);
+
+    }
+
+    public void recuerdaId(String value,Symbol s){
+       
+        RS register = new RS();
+        register.value = value;
+        register.s = s;
+        register.id = RS_TYPES.ID;
+        stack.push(register);
+
+    }
+        
+    public void recuerdaValue(String value,Symbol s){
+
+        RS register = new RS();
+        register.value = value;
+        register.s = s;
+        register.id = RS_TYPES.VALOR;
+        stack.push(register);    
+    
+    }
+
+    public void updateSymbol() {
+        RS value = stack.pop();
+        RS var = stack.pop();
+
+        if(table.validateEstructura(var.value)) {
+           Variable symbolVar = table.getVariable(var.value);
+           if (symbolVar != null) {
+            sectionCode += "\tmov \trax," + value.value + "\n";
+            sectionCode += "\tmov \t[" + symbolVar.getNombre() + "],rax \n";
+            table.updateVariable(symbolVar.getNombre(),value.value);
+           } else {
+            addSemanticError(var.s,"No se puede asignar el valor a una función");
+           }
+           
+        } else {
+            addSemanticError(var.s,"la variable no se encuentra declarada");
+        }
+    }
+
+    public void incDec() {
+        RS variable = stack.pop();
+        RS operator = stack.pop();
+        if (variable.id == RS_TYPES.OPERATOR) {
+            RS aux = variable;
+            operator = variable;
+            variable = aux;
+        }
+        if(table.validateEstructura(variable.value)) {
+           Variable symbolVar = table.getVariable(variable.value);
+           if (symbolVar != null) {
+                sectionCode += "\tmov \trax,[" + variable.value + "]\n";
+                if (operator.value.equals("++")) {
+                    sectionCode += "\tinc \trax \n";
+                    table.updateVariable(symbolVar.getNombre(),String.valueOf(Integer.parseInt(symbolVar.getDato())+1));
+                } else {
+                    sectionCode += "\tdec \trax \n";
+                    table.updateVariable(symbolVar.getNombre(),String.valueOf(Integer.parseInt(symbolVar.getDato())-1));
+                }
+                sectionCode += "\tmov \t[" + variable.value + "],rax\n";
+            } else {
+            addSemanticError(variable.s,"No se puede asignar el valor a una función");
+           }
+           
+        } else {
+            addSemanticError(variable.s,"la variable no se encuentra declarada");
+        }
+    }
+
+    
+    public void insertarTS(){
+       
+        if (stack.peek() != null) {
+            String type = stack.find(RS_TYPES.TYPE);
+            while(stack.peek().value != type){
+                if(stack.peek().id == RS_TYPES.DO){ 
+                
+                    RS registerValor = stack.pop();
+                    RS register = stack.pop();
+                
+                    if(!table.validateEstructura(register.value)){
+                        Estructura variable = new Variable(type,register.value,register.s.right,registerValor.value);
+                        table.addEstructura(register.value,variable);
+                        sectionData = sectionData + "\t " + register.value + ": dd \t" + registerValor.value + " \n";
+                    }
+                    else{
+                        addSemanticError(register.s,"la variable ya se encuentra declarada");
+                    }
+                }
+                else{
+                
+                    RS register = stack.pop();
+                
+                    if(!table.validateEstructura(register.value)){
+                        if (type.equals("int")) {
+                            if (register.s != null) {
+                                Estructura variable = new Variable(type,register.value,register.s.right,"0");
+                                table.addEstructura(register.value,variable);
+                            } else {
+                                Estructura variable = new Variable(type,register.value,-1,"0");
+                                table.addEstructura(register.value,variable);
+                            }
+                            sectionData = sectionData + "\t " + register.value + ": dd \t" + 0 + " \n";
+                        } else if (type.equals("char") || type.equals("char")) {
+                            if (register.s != null) {
+                                Estructura variable = new Variable(type,register.value,register.s.right,"");
+                                table.addEstructura(register.value,variable);
+                            } else {
+                                Estructura variable = new Variable(type,register.value,-1,"");
+                                table.addEstructura(register.value,variable);
+                            }
+                            sectionData = sectionData + "\t " + register.value + ": dd \t" + "\"\"" + " \n";
+                        }
+                    }
+                    else{
+                        addSemanticError(register.s,"la variable ya se encuentra declarada");
+                    }
+                }
+        }
+        stack.pop();
+        }
+    }
+
+    public void insertarTSFuncion() {
+        ArrayList<Parametro> p = new ArrayList();
+
+        while (stack.getSize() > 2) {
+            RS id = stack.pop();
+            RS type = stack.pop();
+            Parametro temp = new Parametro(type.value,id.value);
+            p.add(0,temp);
+        }
+        for (int index = 0; index < p.size(); index++) {
+            p.get(index).setOrden(index+1);
+        }
+        RS id = stack.pop();
+        RS type = stack.pop();
+        if (p.size() == 0) {
+            Estructura funcion = new Funcion(type.value,id.value, id.s.right);
+            table.addEstructura(id.value,funcion);
+        } else {
+            Estructura funcion = new Funcion(type.value,id.value,p,id.s.right);
+            table.addEstructura(id.value,funcion);
+        }
+    }
+
+
+    public void evalBinary () {
+        RS operator = stack.pop();
+        RS register2 = stack.pop();
+        RS register1 = stack.pop();
+        RS_DO register = new RS_DO(RS_TYPES.DO,"",null);
+        if (((RS_DO)register2).type == "constante" && ((RS_DO)register1).type == "constante") {
+            Integer n2 = Integer.parseInt(register2.value);
+            Integer n1 = Integer.parseInt(register1.value);
+            register.type = "constante";
+            switch(operator.value) {
+                case "+" : {
+                    register.value = String.valueOf(n1 + n2);
+                    break;
+                }
+                case "-" : {
+                    register.value = String.valueOf(n1 - n2);
+                    break;
+                }
+                case "/": {
+                    register.value = String.valueOf(n1 / n2);
+                    break;
+                }
+                // mul case
+                default : {
+                    register.value = String.valueOf(n1 * n2);
+                }
+            }
+            
+        } else {
+            /* generar el código para la operación */
+            NasmRegister r1 = new NasmRegister("rax");
+            NasmRegister r2 = nasmRegisters.getFreeRegister();
+            if (r1 == null || r2 == null) {
+                // no hay registros para realizar la operación
+                return;
+            }
+            if (((RS_DO)register1).type == "constante") {
+                sectionCode += "\tmov \t " + r1.name + "," + Integer.parseInt(register1.value) + "\n"; 
+            } else {
+                sectionCode += "\tmov \t " + r1.name + "," + ((RS_DO)register1).name + "\n"; 
+            }
+            if (((RS_DO)register2).type == "constante") {
+                sectionCode += "\tmov \t " + r2.name + "," + Integer.parseInt(register2.value) + "\n"; 
+            } else {
+                sectionCode += "\tmov \t " + r2.name + "," + ((RS_DO)register2).name + "\n";
+            }
+            switch(operator.value) {
+                case "+" : {
+                    sectionCode += "\tadd \t" + r1.name + "," + r2.name + "\n";
+                    break;
+                }
+                case "-" : {
+                    sectionCode += "\tsub \t" + r1.name + "," + r2.name + "\n";
+                    break;
+                }
+                case "/": {
+                    sectionCode += "\tdiv \t" + r2.name + "\n";
+                    break;
+                }
+                // mul case
+                default : {
+                    sectionCode += "\tmul \t" + r2.name + "\n";
+                }
+            }
+            register.type = "constante";
+            /*Guardar la dirección donde queda el resultado de la operación, registro o variable temporal*/            
+            register.value = "0";
+            RS r_var = stack.peek();
+            sectionCode += "\tmov \t" + "[" + r_var.value + "]" + "," + r1.name + "\n";
+            nasmRegisters.setRegisterState(r2.name,true);
+        }
+        stack.push(register);
+   
+    }
+
+    public void evalBoolean() {
+        RS register2 = stack.pop();
+        RS operator = stack.pop();
+        RS register1 = stack.pop();
+        NasmRegister r1 = nasmRegisters.getFreeRegister();
+        NasmRegister r2 = nasmRegisters.getFreeRegister();
+        if (register1.id == RS_TYPES.ID) {
+            sectionCode += "\tmov \t" + r1.name + ",[" + register1.value +"]" + "\n"; 
+        } else {
+            sectionCode += "\tmov \t" + r1.name + "," + register1.value + "\n";
+        }
+        if (register2.id == RS_TYPES.ID) {
+           sectionCode += "\tmov \t" + r2.name + ",[" + register2.value +"]" + "\n"; 
+        } else {
+           sectionCode += "\tmov \t" + r2.name + "," + register2.value + "\n";
+        }
+        sectionCode += "\tcmp \t" + r1.name + "," + r2.name + "\n";
+        nasmRegisters.setRegisterState(r1.name,true);
+        nasmRegisters.setRegisterState(r2.name,true);
+    }
+
+
+    /* BREAK JUMP al exit_label - CONTINUE JUMP al if o while_label */ 
+
+
+    public void startIf(){
+
+        RS_IF register = new RS_IF();
+        count++;
+        register.exit_label = "exit_label" + String.valueOf(count);
+        register.else_label = "else_label" + String.valueOf(count);
+        register.id = RS_TYPES.IF;
+        
+        stack.push(register);
+
+    }
+    
+    public void testIF(){
+        
+        RS register = stack.pop();
+        /* Generar el codigo de la evaluacion segun la direccion del RS_DO
+            Generar Jump Condicional con RS.IF.else_label */
+
+
+    }
+
+    public void startElse(){
+      
+          /* Generar "JUMP" + RS_IF.exit_label
+            Generar RS_IF.else_label + ":" */
+
+    }
+    
+    public void endIF(){
+        
+        /*Generar RS_IF.exit_label + ":" */
+
+        stack.pop();
+    
+    }
+
+    public void startWhile(){
+
+        RS_WHILE register = new RS_WHILE();
+        count++;
+        register.exit_label = "exit_label" + String.valueOf(count);
+        register.while_label = "while_label" + String.valueOf(count);
+        register.id = RS_TYPES.WHILE;
+
+        /*Generar RS_WHILE.while_label + ":" */
+
+        stack.push(register);
+
+
+    }
+
+    public void testWhile(){
+        
+        RS register = stack.pop();
+        /*Generar el código de la evaluación según RS_DO
+            Generar Jump Condicional con RS_WHILE.exit_label */
+    
+
+    }
+
+    public void endWhile(){
+
+        /*Generar “JUMP” + RS_WHILE.while_label
+            Generar RS_WHILE.exit_label + “:” */
+
+        RS register = stack.pop();
+        
+        /* del While (Eso dice en la ppt) */
+    }
+
+    public void writeAssembler() {
+        if (!semanticList.isEmpty()) {
+            return;
+        }
+        Writer assemblerCode;
+        try {
+            assemblerCode = new FileWriter("code.asm", false);
+            assemblerCode.write(this.sectionData);
+            assemblerCode.write(this.sectionCode);
+            assemblerCode.write("final: \n\t mov \t ebx,0 \n\t mov \t eax,1 \n\t int \t 0x80");
+            assemblerCode.close();
+        } catch (IOException ex) {
+            System.err.println(ex.toString());
+        };
+        System.out.print("write function called");
+    }
+
+
+
+
+:}
+
+/*Synmbol Terminal and No-terminal*/
+/*TERMINALS*/
+terminal String INCR, DECR, EQUAL, ADD, SUB, MUL, DIV, MOD;
+terminal String OPEN_BRACKET, CLOSE_BRACKET, ADD_EQUAL, SUB_EQUAL, MUL_EQUAL, DIV_EQUAL, OPEN_KEY, CLOSE_KEY;
+terminal String EQUAL_TO, GREATER_EQUAL, LESS, LESS_EQUAL, GREATER, NOT_EQUAL, LOGICAL_OR, LOGICAL_AND, LOGICAL_NOT;
+terminal String LITERAL_STR, FLOAT_NUMBER, FLOAT_POINT_NUMBER,LITERAL_CHAR;
+terminal String OCTAL_NUMBER, NUMBER, HEXADECIMAL_NUMBER, BINARY_NUMBER;
+terminal String I_BREAK, I_CASE, I_CHAR, I_CONST, I_CONTINUE, I_DEFAULT, I_DO, I_ELSE, I_FOR, I_IF, I_INT, I_LONG;
+terminal String I_RETURN, I_SHORT, I_SWITCH, I_VOID, I_WHILE, I_READ, I_WRITE;
+terminal String SEMICOLON, COMMA, IDENTIFIER,COLON;
+
+/* NON TERMINALS */
+non terminal String program, decl_list, global_decl, const_decl, funct_decl, var_type, var_decl, functin_init;
+non terminal String literal, declaration, var_func_decl_list, stmts, var_func_decl, condition_list;
+non terminal String structs, struct_decl, struct_type, condition_for, condition, var, comparator, change_var,if,else;
+non terminal String switch_sent,mult_case_stmt, case_stmt, case_fin, return,if_sent,if_inst,else_inst, asign_equal,read_func,write_func;
+non terminal String equals, incr_decr, math_expr, expr_uni, expr_math, expr,symbol,case_default,cases_switch,stmts_switch,assigment_type,call_fun ,var_list;
+non terminal String first_part_function, fisrt_part_function2, var_assig, identifier;
+
+start with program;
+
+
+
+program ::= decl_list   {: writeAssembler(); :}
+;
+
+decl_list ::= declaration:d decl_list:dl
+    | declaration:d | asign_equal:ae
+;
+declaration ::= global_decl:gl
+    | const_decl:cl 
+    | funct_decl:fl 
+    | error SEMICOLON:sm     {:addSintaxError(sm," Missing token ");:}
+    | error OPEN_KEY:ok      {:addSintaxError(ok," Unknown token { ");:}
+    | error CLOSE_KEY:ck     {:addSintaxError(ck," Missing token ");:}
+    | error OPEN_BRACKET:ob  {:addSintaxError(ob," Unknown token ( ");:}
+    | error CLOSE_BRACKET:cb {:addSintaxError(cb," Missing token ");:}
+    | error IDENTIFIER:i     {:addSintaxError(i," Missing token ");:}
+;
+global_decl ::= var_func_decl COMMA var_decl:vd SEMICOLON {: insertarTS(); :}
+    | var_func_decl EQUAL assigment_type:at COMMA var_decl:vd SEMICOLON {: insertarTS(); :}
+    | var_func_decl SEMICOLON {: insertarTS(); :}
+    | var_func_decl EQUAL assigment_type:at SEMICOLON {: insertarTS(); :}
+;
+var_type ::=  I_SHORT:i {: recuerdaTipo(i,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | I_LONG:i {: recuerdaTipo(i,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | I_INT:i {: recuerdaTipo(i,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | I_CHAR:i MUL:m  {: recuerdaTipo(i+m,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | I_CHAR:i {: recuerdaTipo(i,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+;
+var_decl   ::= IDENTIFIER:i EQUAL:e assigment_type:at 
+            {: recuerdaId(i,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-2))); :}
+    
+    | IDENTIFIER:i 
+        {: recuerdaId(i,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+        
+    | IDENTIFIER:i EQUAL assigment_type:at COMMA var_decl:vd
+      {: recuerdaId(i,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-4))); :} 
+    | IDENTIFIER:i COMMA var_decl:vd 
+      {: recuerdaId(i,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-2))); :} 
+  
+;
+assigment_type ::= LITERAL_STR:ls {: recuerdaConst(ls,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+                | LITERAL_CHAR:lc {: recuerdaConst(lc,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+                | expr_math:em 
+                | literal:l
+;
+const_decl  ::= I_CONST var_type:vt var_decl:vd SEMICOLON {: insertarTS(); :}
+          
+                
+          
+;
+funct_decl ::= first_part_function stmts:s CLOSE_KEY:ck
+    | fisrt_part_function2 stmts:s CLOSE_KEY:ck 
+    | functin_init:fi OPEN_BRACKET:ob CLOSE_BRACKET:cb OPEN_KEY:ok CLOSE_KEY:ck  {: insertarTSFuncion(); :}
+    | functin_init:fi OPEN_BRACKET:ob var_func_decl_list:vfdl CLOSE_BRACKET:cb OPEN_KEY:ok CLOSE_KEY:ck {: insertarTSFuncion(); :}
+;
+
+first_part_function ::= functin_init:fi OPEN_BRACKET:ob var_func_decl_list:vfdl CLOSE_BRACKET:cb OPEN_KEY:ok {: insertarTSFuncion(); :}
+;
+fisrt_part_function2 ::= functin_init:fi OPEN_BRACKET:ob CLOSE_BRACKET:cb OPEN_KEY:ok {: insertarTSFuncion(); :}
+;
+functin_init   ::= var_func_decl:cfd
+    | I_VOID:i IDENTIFIER:id 
+    {: recuerdaTipo(i,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-1))); 
+       recuerdaId(id,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+;
+var_func_decl_list   ::= var_func_decl:vfd COMMA var_func_decl_list:vfdl
+    | var_func_decl:vfd 
+;
+var_func_decl ::= var_type:vt  
+                IDENTIFIER:i 
+                {: recuerdaId(i,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}               
+;
+stmts ::= const_decl stmts:s
+        | const_decl
+        | global_decl:gl stmts:s
+        | global_decl:gl
+        | structs:st stmts:sm
+        | structs:st 
+        | asign_equal:ae SEMICOLON:sc stmts:sm
+        | asign_equal:ae SEMICOLON:sc
+        | var_assig stmts:sm
+        | var_assig
+        | MUL:m IDENTIFIER:i EQUAL assigment_type:at SEMICOLON stmts:sm
+        | MUL:m IDENTIFIER:i EQUAL assigment_type:at SEMICOLON
+        | incr_decr SEMICOLON:sc stmts:sm
+        | incr_decr SEMICOLON:sc
+        | expr_math SEMICOLON:sc stmts:sm
+        | expr_math
+        | read_func:rf stmts:s
+        | read_func:rf
+        | write_func:wf stmts:s
+        | write_func:wf 
+        | call_fun:cf SEMICOLON:sc stmts:s
+        | call_fun:cf SEMICOLON:sc
+        | return:r stmts
+        | return:r
+
+;
+var_assig ::= identifier EQUAL assigment_type:at SEMICOLON 
+            {: updateSymbol(); :}
+;
+identifier ::= IDENTIFIER:i  {: recuerdaId(i,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-3))); :}
+;
+stmts_switch ::= structs:st stmts_switch:sw
+                | structs:st 
+                | asign_equal:ae SEMICOLON:sc stmts_switch:sw 
+                | asign_equal:ae SEMICOLON:sc
+                | IDENTIFIER:i EQUAL assigment_type:at SEMICOLON stmts_switch:sw {}
+                | IDENTIFIER:i EQUAL assigment_type:at SEMICOLON
+                | MUL:m IDENTIFIER:i EQUAL assigment_type:at SEMICOLON stmts_switch:sw
+                | MUL:m IDENTIFIER:i EQUAL assigment_type:at SEMICOLON
+                | incr_decr SEMICOLON:sc stmts_switch:sw
+                | incr_decr
+                | expr_math SEMICOLON:sc stmts_switch:sw
+                | expr_math
+                | read_func:rf stmts_switch:ss
+                | read_func:rf
+                | write_func:wf stmts_switch:ss
+                | write_func:wf
+                | call_fun:cf SEMICOLON:sc stmts_switch:sw  
+                | call_fun:cf SEMICOLON:sc
+                | return:r stmts_switch 
+                | return:r
+;
+
+call_fun ::= IDENTIFIER:i OPEN_BRACKET:ob CLOSE_BRACKET:cb {: recuerdaFuncion(i,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-2))); :}
+            | IDENTIFIER:i OPEN_BRACKET:ob var_list:vl CLOSE_BRACKET:cb  {: recuerdaFuncion(i,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-3))); :}
+;
+
+read_func ::= I_READ:r OPEN_BRACKET:ob IDENTIFIER:i CLOSE_BRACKET:cb SEMICOLON:s
+    |   OPEN_BRACKET:ob CLOSE_BRACKET:cb SEMICOLON:s
+;
+
+write_func ::= I_WRITE:w OPEN_BRACKET:ob var_list:vl CLOSE_BRACKET:cb SEMICOLON:s
+;
+
+var_list ::=  assigment_type:at COMMA var_list:vl 
+           | assigment_type:at
+;
+        
+structs ::= struct_decl OPEN_KEY:ok stmts:s CLOSE_KEY:ck
+           | struct_decl OPEN_KEY:ok case_fin:cf stmts:s CLOSE_KEY:ck
+           | struct_decl OPEN_KEY:ok case_fin:cf CLOSE_KEY:ck
+           |switch_sent:ss 
+           |if_sent:is
+;
+            
+struct_decl ::= struct_type:st OPEN_BRACKET:ob condition_list:c CLOSE_BRACKET:cb
+            | struct_type:st OPEN_BRACKET:ob condition_for:cf CLOSE_BRACKET:cb 
+;
+struct_type ::= I_FOR:f
+               |I_WHILE:w
+;
+if_sent ::= if_inst:is else_inst:es
+        |if_inst:is
+;
+if_inst ::= I_IF:i OPEN_BRACKET:ob condition_list:c CLOSE_BRACKET:cb OPEN_KEY:ok stmts:s CLOSE_KEY:ck 
+;
+else_inst ::= I_ELSE:i OPEN_KEY:ok stmts:s CLOSE_KEY:ck 
+;
+switch_sent ::= I_SWITCH:s OPEN_BRACKET:o var:v CLOSE_BRACKET:c OPEN_KEY:ok cases_switch:cs CLOSE_KEY:ck
+;
+cases_switch ::= mult_case_stmt:mc case_default:cd
+                |mult_case_stmt:mc
+;
+mult_case_stmt ::= case_stmt:cs mult_case_stmt:mcs 
+                   | case_stmt:cs 
+ 
+; 
+case_default ::= I_DEFAULT:d COLON:c stmts_switch:s case_fin:cf 
+            | I_DEFAULT:d COLON:c stmts_switch:s
+            | I_DEFAULT:d COLON:c stmts_switch:s case_fin:cf return:r
+
+;
+case_stmt ::= I_CASE:c NUMBER:n COLON stmts_switch:s case_fin:cf 
+            | I_CASE:c NUMBER:n COLON stmts_switch:s 
+            | I_CASE:c NUMBER:n COLON stmts_switch:s case_fin:cf return:r
+            | I_CASE:c NUMBER:n COLON case_fin:cf 
+            | I_CASE:c NUMBER:n COLON case_fin:cf return:r
+            | I_CASE:c NUMBER:n COLON 
+;
+case_fin ::= I_BREAK:b SEMICOLON | I_CONTINUE:c SEMICOLON                                                     
+;
+return ::= I_RETURN:r var:v SEMICOLON:s  
+        | I_RETURN:r SEMICOLON:s 
+;
+
+change_var ::= INCR:i {: recuerdaOperador(i, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+            |DECR:d {: recuerdaOperador(d, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+;
+condition_list ::= condition comparator condition_list 
+                |condition
+;
+condition ::=  var:v comparator:c var:v1 {: evalBoolean(); :}
+            | OPEN_BRACKET var:v comparator:c var:v1 CLOSE_BRACKET
+            | OPEN_BRACKET var:v CLOSE_BRACKET
+
+;
+condition_for ::= var_type:vt var_decl:vd SEMICOLON:sc condition:c SEMICOLON:sc1 incr_decr
+;
+incr_decr ::= IDENTIFIER:i change_var:cv 
+            {: recuerdaId(i, ((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-1))); 
+               incDec(); 
+            :}
+            | change_var:cv IDENTIFIER:i 
+            {: recuerdaId(i, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); 
+               incDec();
+            :}
+;
+comparator ::= EQUAL_TO:et {: recuerdaOperador(et, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+             |GREATER_EQUAL:ge {: recuerdaOperador(ge, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+             |LESS:l {: recuerdaOperador(l, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+             |LESS_EQUAL:le {: recuerdaOperador(le, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+             |GREATER:gr {: recuerdaOperador(gr, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+             |NOT_EQUAL:ne {: recuerdaOperador(ne, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+             |LOGICAL_AND 
+             |LOGICAL_OR
+
+;
+var ::= NUMBER:n   {: recuerdaConst(n,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | IDENTIFIER:i {: recuerdaId(i, ((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | LOGICAL_NOT:ln IDENTIFIER:i
+;
+asign_equal ::= IDENTIFIER:i equals:e var
+;
+equals ::= ADD_EQUAL 
+    | SUB_EQUAL 
+    | MUL_EQUAL 
+    | DIV_EQUAL
+;
+
+
+expr_math ::= OPEN_BRACKET:o expr_math:em CLOSE_BRACKET:c expr_math:em1
+            | OPEN_BRACKET:o expr_math:em CLOSE_BRACKET:c
+            | literal:u expr_uni:eu {: evalBinary(); :}
+            | expr_uni:eu
+;
+
+expr_uni ::= ADD:a literal:n expr_uni:eu {: recuerdaOperador(a,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | ADD:a literal:n {: recuerdaOperador(a,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-1))); :}
+    | SUB:s literal:n expr_uni:eu {: recuerdaOperador(s,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | SUB:s literal:n {: recuerdaOperador(s,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-1))); :}
+    | MUL:m literal:n expr_uni:eu {: recuerdaOperador(m,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | MUL:m literal:n {: recuerdaOperador(m,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-1))); :}
+    | DIV:d literal:n expr_uni:eu {: recuerdaOperador(d,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | DIV:d literal:n {: recuerdaOperador(d,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-1))); :}
+    | MOD:d literal:n expr_uni:eu {: recuerdaOperador(d,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | MOD:d literal:n {: recuerdaOperador(d,((java_cup.runtime.Symbol)CUP$Parser$stack.elementAt(CUP$Parser$top-1))); :}
+;
+
+symbol ::= ADD:a
+        |SUB:s
+        |MUL:m
+        |DIV:d
+        |MOD:d
+;
+
+literal ::= NUMBER:n {: recuerdaConst(n,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | IDENTIFIER:i {: recuerdaVariable(i,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | OCTAL_NUMBER:n {: recuerdaConst(n,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | HEXADECIMAL_NUMBER:n {: recuerdaConst(n,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | BINARY_NUMBER:n {: recuerdaConst(n,((java_cup.runtime.Symbol)CUP$Parser$stack.peek())); :}
+    | call_fun:cf
+;
+
